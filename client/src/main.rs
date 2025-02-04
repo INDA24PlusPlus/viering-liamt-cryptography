@@ -5,8 +5,9 @@ use crypto::{
     aes_gcm,
 };
 use rand::Rng;
+use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
-use shared::EncFile;
+use shared::{EncFile, EncFileResponse};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -19,12 +20,19 @@ struct Cli {
 #[derive(Subcommand)]
 enum CliCommand {
     Upload(UploadArgs),
+    Retrieve(RetrieveArgs),
 }
 
 #[derive(Parser)]
 struct UploadArgs {
     #[arg(required = true)]
     file: PathBuf,
+}
+
+#[derive(Parser)]
+struct RetrieveArgs {
+    #[arg(required = true)]
+    id: u16,
 }
 
 fn main() {
@@ -38,13 +46,40 @@ fn main() {
 
             let key = derive_key("haileywelsch");
 
-            println!("encrypting:");
             let enc = encrypt(&content, &key);
 
-            println!("decrypting:");
-            let dec = decrypt(enc, &key);
+            let client = Client::new();
+            let res = client
+                .post("http://localhost:8000/file")
+                .json(&enc)
+                .send()
+                .unwrap();
 
-            println!("dec: {:?}", String::from_utf8(dec).unwrap());
+            println!("response: {:?}", res.text().unwrap());
+        }
+        CliCommand::Retrieve(retrieve_args) => {
+            println!("retrieving file: {}", retrieve_args.id);
+
+            let client = Client::new();
+            let res = client
+                .get(format!("http://localhost:8000/file/{}", retrieve_args.id))
+                .send()
+                .unwrap();
+
+            let res: EncFileResponse = res.json().unwrap();
+
+            match res {
+                EncFileResponse::Success(file) => {
+                    let key = derive_key("haileywelsch");
+
+                    let dec = decrypt(&file, &key);
+
+                    println!("dec: {:?}", String::from_utf8(dec).unwrap());
+                }
+                EncFileResponse::Error { error } => {
+                    println!("error: {}", error);
+                }
+            }
         }
     }
 }
@@ -83,10 +118,11 @@ fn encrypt(data: &Vec<u8>, key: &[u8; 32]) -> EncFile {
         nonce,
         tag,
         data: output,
+        id: -1,
     }
 }
 
-fn decrypt(file: EncFile, key: &[u8; 32]) -> Vec<u8> {
+fn decrypt(file: &EncFile, key: &[u8; 32]) -> Vec<u8> {
     let mut dec = aes_gcm::AesGcm::new(KeySize::KeySize256, key, &file.nonce, &[0]);
 
     let mut output = vec![0u8; file.data.len()];
