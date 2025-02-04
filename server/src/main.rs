@@ -3,45 +3,59 @@ extern crate rocket;
 
 use rocket::State;
 use rocket::serde::json::Json;
-use shared::{EncFile, EncFileResponse};
+use rs_merkle::{MerkleTree, algorithms::Sha256 as MerkleSha256};
+use shared::{EncFile, RetrieveResponse, RetrieveResponseEnum, UploadResponse, hash_encfile};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 struct ServerState {
     pub db: Mutex<HashMap<String, EncFile>>,
-    pub current_id: Mutex<u64>,
+    pub current_id: Mutex<usize>,
+    pub merkle_tree: Mutex<MerkleTree<MerkleSha256>>,
 }
 
 #[get("/")]
 fn index() -> &'static str {
-    "welcome to skibidifiles (tm)!"
+    "Welcome to skibidifiles (tm)!"
 }
 
 #[post("/file", format = "json", data = "<file>")]
-fn upload_file(file: Json<EncFile>, state: &State<ServerState>) -> String {
-    println!("file: {:?} {:?} {:?}", file.data, file.nonce, file.tag);
-
+fn upload_file(file: Json<EncFile>, state: &State<ServerState>) -> Json<UploadResponse> {
     let mut db = state.db.lock().unwrap();
     let mut current_id = state.current_id.lock().unwrap();
+    let mut merkle_tree = state.merkle_tree.lock().unwrap();
+
+    let hash = hash_encfile(&file.clone().into_inner());
+    merkle_tree.insert(hash).commit();
 
     let id = current_id.to_string();
-
     db.insert(id.clone(), file.into_inner());
     *current_id += 1;
 
-    id
+    Json(UploadResponse { id })
 }
 
 #[get("/file/<id>")]
-fn download_file(id: String, state: &State<ServerState>) -> Json<EncFileResponse> {
+fn download_file(id: String, state: &State<ServerState>) -> Json<RetrieveResponseEnum> {
     let db = state.db.lock().unwrap();
+    let merkle_tree = state.merkle_tree.lock().unwrap();
+    let current_id = state.current_id.lock().unwrap();
+
     match db.get(&id) {
         Some(file) => {
-            println!("file: {:?} {:?} {:?}", file.data, file.nonce, file.tag);
-            Json(EncFileResponse::Success((*file).clone()))
+            let proof = merkle_tree
+                .proof(&[id.parse::<usize>().unwrap() - 1])
+                .to_bytes();
+
+            Json(RetrieveResponseEnum::Success(RetrieveResponse {
+                proof,
+                file: file.clone(),
+                merkle_root: merkle_tree.root().unwrap(),
+                merkle_tree_len: *current_id - 1,
+            }))
         }
-        None => Json(EncFileResponse::Error {
-            error: "file not found".to_string(),
+        None => Json(RetrieveResponseEnum::Error {
+            error: "File not found".to_string(),
         }),
     }
 }
@@ -53,5 +67,6 @@ fn rocket() -> _ {
         .manage(ServerState {
             db: Mutex::new(HashMap::new()),
             current_id: Mutex::new(1),
+            merkle_tree: Mutex::new(MerkleTree::new()),
         })
 }

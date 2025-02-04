@@ -8,3 +8,5 @@ rocket = { version = "0.5.1", features = ["json"] }
 shared = { path = "../shared" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+rs_merkle = "1.4.2"
+sha2 = "0.10.8"

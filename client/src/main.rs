@@ -1,3 +1,4 @@
+use argon2::Argon2;
 use clap::{Parser, Subcommand};
 use crypto::{
     aead::{AeadDecryptor, AeadEncryptor},
@@ -6,8 +7,8 @@ use crypto::{
 };
 use rand::Rng;
 use reqwest::blocking::Client;
-use sha2::{Digest, Sha256};
-use shared::{EncFile, EncFileResponse};
+use rs_merkle::{MerkleProof, algorithms::Sha256 as MerkleSha256};
+use shared::{EncFile, RetrieveResponseEnum, UploadResponse, hash_encfile};
 use std::{path::PathBuf, process::exit};
 
 #[derive(Parser)]
@@ -34,7 +35,7 @@ struct UploadArgs {
 #[derive(Parser)]
 struct RetrieveArgs {
     #[arg(required = true)]
-    id: u16,
+    id: usize,
     #[arg(required = true)]
     password: String,
     /// Output file stored in the specified path.
@@ -67,10 +68,9 @@ fn upload(upload_args: &UploadArgs) {
         .send()
         .unwrap();
 
-    println!(
-        "File successfully uploaded with id: {:?}",
-        res.text().unwrap()
-    );
+    let res: UploadResponse = res.json().unwrap();
+
+    println!("File successfully uploaded with id: {}", res.id);
 }
 
 fn retrieve(retrieve_args: &RetrieveArgs) {
@@ -82,11 +82,26 @@ fn retrieve(retrieve_args: &RetrieveArgs) {
         .send()
         .unwrap();
 
-    let res: EncFileResponse = res.json().unwrap();
+    let res: RetrieveResponseEnum = res.json().unwrap();
     match res {
-        EncFileResponse::Success(file) => {
+        RetrieveResponseEnum::Success(retrieve_res) => {
+            let hash = hash_encfile(&retrieve_res.file);
+            let merkle_proof =
+                MerkleProof::<MerkleSha256>::from_bytes(&retrieve_res.proof).unwrap();
+            let valid = merkle_proof.verify(
+                retrieve_res.merkle_root,
+                &[retrieve_args.id - 1],
+                &[hash],
+                retrieve_res.merkle_tree_len,
+            );
+
+            if !valid {
+                println!("Invalid proof, filesystem may have been tampered with");
+                exit(0);
+            }
+
             let key = derive_key(&retrieve_args.password);
-            let dec = decrypt(&file, &key);
+            let dec = decrypt(&retrieve_res.file, &key);
 
             match &retrieve_args.out {
                 Some(out) => {
@@ -98,7 +113,7 @@ fn retrieve(retrieve_args: &RetrieveArgs) {
                 }
             }
         }
-        EncFileResponse::Error { error } => {
+        RetrieveResponseEnum::Error { error } => {
             println!("Error: {}", error);
         }
     }
@@ -115,10 +130,15 @@ fn read_file(file: &PathBuf) -> Vec<u8> {
 }
 
 fn derive_key(password: &str) -> [u8; 32] {
-    Sha256::digest(password.as_bytes())
-        .as_slice()
-        .try_into()
-        .unwrap()
+    let mut out_key = [0u8; 32];
+
+    let salt = b"skibidifiles";
+
+    Argon2::default()
+        .hash_password_into(password.as_bytes(), salt, &mut out_key)
+        .unwrap();
+
+    out_key
 }
 
 fn encrypt(data: &Vec<u8>, key: &[u8; 32]) -> EncFile {
@@ -139,7 +159,6 @@ fn encrypt(data: &Vec<u8>, key: &[u8; 32]) -> EncFile {
         nonce,
         tag,
         data: output,
-        id: -1,
     }
 }
 
