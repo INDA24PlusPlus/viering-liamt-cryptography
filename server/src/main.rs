@@ -25,11 +25,13 @@ fn upload_file(file: Json<EncFile>, state: &State<ServerState>) -> Json<UploadRe
     let mut current_id = state.current_id.lock().unwrap();
     let mut merkle_tree = state.merkle_tree.lock().unwrap();
 
-    let hash = hash_encfile(&file.clone().into_inner());
+    let file_data = file.into_inner();
+
+    let hash = hash_encfile(&file_data);
     merkle_tree.insert(hash).commit();
 
     let id = current_id.to_string();
-    db.insert(id.clone(), file.into_inner());
+    db.insert(id.clone(), file_data);
     *current_id += 1;
 
     Json(UploadResponse { id })
